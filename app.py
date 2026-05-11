@@ -143,4 +143,34 @@ if uploaded_files:
 
         df_clean = pd.DataFrame(df_list)
         
-        col_res
+        col_res1, col_res2 = st.columns([2, 1])
+        
+        with col_res2:
+            draw_style = st.radio("🟢 描画スタイル", ("真円で近似する (AI風)", "ギザギザの実際の輪郭", "表示しない"), index=0)
+            st.metric("検出数", f"{len(df_clean)} 個" if not df_clean.empty else "0 個")
+            if not df_clean.empty:
+                st.metric("平均直径", f"{df_clean['diameter_um'].mean():.1f} μm")
+                st.metric("平均真円度", f"{df_clean['circularity'].mean():.2f}")
+                
+        with col_res1:
+            fig, ax = plt.subplots()
+            ax.imshow(img_np) 
+            
+            if not df_clean.empty:
+                if draw_style == "真円で近似する (AI風)":
+                    # スフェアの中心と直径から、数学的に完璧な丸を描く
+                    for _, row in df_clean.iterrows():
+                        r = row['equivalent_diameter'] / 2
+                        circle = mpatches.Circle((row['centroid_x'], row['centroid_y']), r, 
+                                                 fill=False, edgecolor='lime', linewidth=1.0)
+                        ax.add_patch(circle)
+                elif draw_style == "ギザギザの実際の輪郭":
+                    # 以前見えていなかった「スフェア同士の境界線」も描画するように修正
+                    valid_labels = df_clean['label'].values
+                    valid_mask = np.isin(labels, valid_labels)
+                    filtered_labels = np.where(valid_mask, labels, 0)
+                    if filtered_labels.max() > 0:
+                        ax.contour(filtered_labels, levels=np.arange(filtered_labels.max() + 1) + 0.5, colors='lime', linewidths=0.5)
+            
+            ax.axis('off')
+            st.pyplot(fig)
