@@ -4,11 +4,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from skimage import color, filters, morphology, feature, segmentation, measure
 from scipy import ndimage as ndi
+import io as python_io
 from PIL import Image, ImageEnhance, ImageOps
 import cv2
 
-st.set_page_config(page_title="Sphere Analyzer v3.4", layout="wide")
-st.title("🔴 スフェア自動計測ツール v3.4 (背景くり抜きモード)")
+st.set_page_config(page_title="Sphere Analyzer v3.5", layout="wide")
+st.title("🔴 スフェア自動計測ツール v3.5 (隠しフィルター全解放版)")
 
 with st.sidebar:
     st.header("1. 基本設定")
@@ -22,18 +23,20 @@ with st.sidebar:
 
     st.header("3. 二値化 (くり抜きモード)")
     # 今回の目玉：抽出方法の選択
-    extraction_mode = st.radio("抽出方法:", ("背景を一気にくり抜く (のっぺり抽出) [ユーザー発案]", "細かい影を拾う (従来)"), index=0)
+    extraction_mode = st.radio("抽出方法:", ("背景を一気にくり抜く (おすすめ)", "細かい影を拾う (従来)"), index=0)
     
-    blur_sigma = st.slider("ぼかし強さ", 0.0, 10.0, 3.0, help="背景を滑らかにして分離しやすくします")
+    blur_sigma = st.slider("ぼかし強さ (ノイズ消し)", 0.0, 10.0, 0.0, help="背景を滑らかにして分離しやすくします")
     
-    if extraction_mode == "背景を一気にくり抜く (のっぺり抽出) [ユーザー発案]":
-        global_offset = st.slider("背景の判定ライン (閾値微調整)", -0.30, 0.30, 0.00, step=0.01, help="右に動かすと背景が削れスフェアが太くなり、左に動かすと背景が広がります")
+    if extraction_mode == "背景を一気にくり抜く (おすすめ)":
+        # 隠していたパラメータを解放
+        global_offset = st.slider("背景の判定ライン (閾値微調整)", -0.30, 0.30, 0.00, step=0.01)
     else:
         block_size_slider = st.slider("二値化の細かさ (Block Size)", 11, 201, 51, step=10)
         local_offset = st.slider("縁の拾いやすさ (Offset)", -0.10, 0.10, 0.00, step=0.01)
 
     st.header("4. ノイズ処理 (ImageJ機能)")
-    noise_removal = st.slider("ゴミ取り (最小ピクセル数)", 0, 1000, 50, help="この数値以下の小さな点を消去します")
+    # 追加：隠していたゴミ取りと穴埋めを解放
+    noise_removal = st.slider("ゴミ取り (最小ピクセル数)", 0, 500, 50, help="この数値以下の小さな点を消去します")
     fill_holes = st.checkbox("スフェア内部の穴埋めを実行", value=True, help="ザラザラを潰して一つの塊にします")
 
     st.header("5. 切り離し (Watershed)")
@@ -69,7 +72,7 @@ if uploaded_files:
             blurred = gray
 
         # 二値化のロジック分岐
-        if extraction_mode == "背景を一気にくり抜く (のっぺり抽出) [ユーザー発案]":
+        if extraction_mode == "背景を一気にくり抜く (おすすめ)":
             base_thresh = filters.threshold_otsu(blurred)
             adj_thresh = base_thresh + global_offset
             if invert_image:
@@ -86,11 +89,13 @@ if uploaded_files:
             else:
                 binary = blurred < local_thresh 
             
+        # 表に出した「ゴミ取り機能」
         if noise_removal > 0:
             cleaned = morphology.remove_small_objects(binary, min_size=noise_removal)
         else:
             cleaned = binary
 
+        # 表に出した「穴埋め機能」
         if fill_holes:
             filled = ndi.binary_fill_holes(cleaned)
         else:
@@ -114,7 +119,7 @@ if uploaded_files:
             with col_a:
                 st.image(img_edit, caption="0. 補正後の画像", use_container_width=True)
             with col_b:
-                st.image(binary.astype(float), caption="1. 二値化 (背景から逆算)", use_container_width=True)
+                st.image(binary.astype(float), caption="1. 二値化 (すべて拾った状態)", use_container_width=True)
             with col_c:
                 st.image(filled.astype(float), caption="2. ゴミ取り＆穴埋め後", use_container_width=True)
 
@@ -137,8 +142,7 @@ if uploaded_files:
             
             with col_res1:
                 fig, ax = plt.subplots()
-                # 最終結果は、色を変えていない元の画像の上に緑の線を引く
-                ax.imshow(np.array(img_raw)) 
+                ax.imshow(img_np) 
                 ax.contour(labels > 0, colors='lime', linewidths=0.5)
                 ax.axis('off')
                 st.pyplot(fig)
