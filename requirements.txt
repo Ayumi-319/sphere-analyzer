@@ -1,3 +1,7 @@
 streamlit
 cellpose
 scikit-image
+matplotlib
+pandas
+openpyxl
+python-pptx
