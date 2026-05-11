@@ -1,137 +1,110 @@
 import streamlit as st
-from cellpose import models
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from skimage import measure, segmentation
+from skimage import color, filters, morphology, feature, segmentation, measure
+from scipy import ndimage as ndi
 import io as python_io
-from PIL import Image, ImageOps
-import torch
+from PIL import Image
 import cv2
-import gc
 
-st.set_page_config(page_title="Sphere Analyzer v2.15", layout="wide")
-st.title("🔴 スフェア自動計測ツール v2.15 (爆速テストモード搭載)")
-
-@st.cache_resource
-def get_model(m_type):
-    return models.CellposeModel(gpu=False, model_type=m_type, device=torch.device('cpu'))
-
-if 'masks_cache' not in st.session_state:
-    st.session_state.masks_cache = {}
+st.set_page_config(page_title="Sphere Analyzer v3.0", layout="wide")
+st.title("🔴 スフェア自動計測ツール v3.0 (爆速・Watershed版)")
 
 with st.sidebar:
     st.header("1. 基本設定")
     mag = st.radio("倍率:", ("4x", "10x", "カスタム"), index=0)
     um_per_pixel = 3.23 if mag == "4x" else 1.28 if mag == "10x" else st.number_input("μm/px", value=1.0)
 
-    st.header("2. AIを助ける前処理 (即時)")
-    clahe_clip = st.slider("縁のクッキリ度 (CLAHE)", 0.0, 10.0, 3.0)
-    invert_image = st.checkbox("画像を白黒反転する", value=True)
-    
-    with st.form("ai_settings_form"):
-        st.header("3. AI解析設定")
-        
-        # 新機能：テストモード
-        test_mode = st.checkbox("⚡ テストモード (中央部分だけを爆速で解析)", value=True, help="条件出しの時はON、全体を解析する時はOFFにしてください")
-        
-        model_choice = st.radio("AIモデル:", ("cyto2", "nuclei"), index=0)
-        target_diameter = st.number_input("予想直径 (px) ※0で自動推定", value=0, help="0にするとAIが自動で最適なサイズを探します")
-        flow_threshold = st.slider("切り離し強度", 0.0, 1.1, 0.9)
-        cellprob_threshold = st.slider("検出感度", -6.0, 6.0, 0.0, help="プラスにすると厳しく(縮む)、マイナスにすると甘く(広がる)なります")
-        
-        submit_btn = st.form_submit_button("🚀 この設定でAI解析を実行")
+    st.header("2. 画像の二値化 (白黒にする)")
+    blur_sigma = st.slider("ぼかし強さ (内部のノイズ消し)", 1.0, 10.0, 3.0, help="大きいほど中のザラザラが消えます")
+    offset = st.slider("縁の拾いやすさ", -0.05, 0.05, 0.00, step=0.01, help="スフェアの輪郭がうまく線にならない時に微調整します")
 
-    st.header("4. フィルタ設定 (即時)")
+    st.header("3. 切り離し設定 (Watershed)")
+    min_dist = st.number_input("スフェアの中心間の最小距離 (px)", value=30, help="このピクセル数より近いものは「1つのスフェア」とみなして合体させます。細切れになる場合は数値を上げてください。")
+
+    st.header("4. フィルタ設定 (足切り)")
     exclude_border = st.checkbox("画像端を除外", value=True)
-    circularity_threshold = st.slider("真円度しきい値", 0.0, 1.0, 0.7)
+    min_area = st.number_input("最小面積 (px)", value=100, help="これより小さいゴミを除外します")
+    circularity_threshold = st.slider("真円度しきい値", 0.0, 1.0, 0.6)
 
 uploaded_files = st.file_uploader("ドロップ", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
 
 if uploaded_files:
     for f in uploaded_files:
-        # 画像の読み込みとベースの軽量化
+        # 画像読み込み (処理を軽くするため最大1000pxに制限)
         img_raw = Image.open(f).convert('RGB')
-        img_raw.thumbnail((800, 800), Image.Resampling.LANCZOS)
+        img_raw.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
         img_np = np.array(img_raw)
         
-        # CLAHE
-        if clahe_clip > 0:
-            lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(8,8))
-            cl = clahe.apply(l)
-            limg = cv2.merge((cl,a,b))
-            img_np = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
-
-        # 白黒反転
-        if invert_image:
-            img_np = cv2.bitwise_not(img_np)
-            
-        # ⚡ テストモードのクロップ（切り抜き）処理
-        if test_mode:
-            h, w = img_np.shape[:2]
-            # 中央の1/4の面積を切り抜く
-            sy, ey = int(h*0.25), int(h*0.75)
-            sx, ex = int(w*0.25), int(w*0.75)
-            img_process = img_np[sy:ey, sx:ex]
-            img_display = np.array(img_raw)[sy:ey, sx:ex]
-        else:
-            img_process = img_np
-            img_display = np.array(img_raw)
+        # --- ここからImageJと同じ処理 ---
+        gray = color.rgb2gray(img_np)
+        blurred = filters.gaussian(gray, sigma=blur_sigma)
         
+        # 適応的閾値処理（局所的な明るさの違いに対応）
+        block_size = 51
+        local_thresh = filters.threshold_local(blurred, block_size, offset=offset)
+        # 位相差は縁が暗いので、閾値より暗い部分をTrue（白）にする
+        binary = blurred < local_thresh 
+        
+        # ノイズ除去と穴埋め（縁の中を塗りつぶす）
+        cleaned = morphology.remove_small_objects(binary, min_size=50)
+        filled = ndi.binary_fill_holes(cleaned)
+        
+        # 距離変換とWatershed（切り離し）
+        distance = ndi.distance_transform_edt(filled)
+        coords = feature.peak_local_max(distance, min_distance=min_dist, labels=filled)
+        
+        mask = np.zeros(distance.shape, dtype=bool)
+        mask[tuple(coords.T)] = True
+        markers, _ = ndi.label(mask)
+        labels = segmentation.watershed(-distance, markers, mask=filled)
+        
+        # 端の除外
+        if exclude_border:
+            labels = segmentation.clear_border(labels)
+        # ---------------------------------
+
         st.subheader(f"解析: {f.name}")
-        col_pre, col_res = st.columns(2)
         
-        with col_pre:
-            st.image(img_process, caption="AIが実際に見ている画像", use_container_width=True, channels="RGB")
+        # デバッグ用（ImageJでいう途中経過の確認）
+        with st.expander("🔍 途中経過（二値化・塗りつぶし）を見る"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.image(cleaned.astype(float), caption="1. 縁の抽出", use_container_width=True)
+            with col_b:
+                st.image(filled.astype(float), caption="2. 穴埋め後", use_container_width=True)
 
-        # キャッシュキーにテストモードの状態も含める
-        cache_key = f"{f.name}_{clahe_clip}_{invert_image}_{test_mode}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
-
-        if submit_btn or cache_key in st.session_state.masks_cache:
-            if cache_key not in st.session_state.masks_cache:
-                with st.spinner('AIが計算中...'):
-                    model_name = 'cyto2' if model_choice == "cyto2" else 'nuclei'
-                    model = get_model(model_name)
-                    
-                    # diameter=0 の場合は None に変換して自動推定させる
-                    diam = None if target_diameter == 0 else target_diameter
-                    
-                    masks, _, _ = model.eval(img_process, 
-                                             diameter=diam, 
-                                             flow_threshold=flow_threshold,
-                                             cellprob_threshold=cellprob_threshold,
-                                             channels=[0,0])
-                    st.session_state.masks_cache[cache_key] = masks
-                    gc.collect()
-
-            masks = st.session_state.masks_cache[cache_key].copy()
+        # 計測
+        props = measure.regionprops_table(labels, properties=['label', 'area', 'perimeter', 'equivalent_diameter'])
+        df = pd.DataFrame(props)
+        
+        col_res1, col_res2 = st.columns([2, 1])
+        
+        if not df.empty:
+            df = df[df['area'] >= min_area] # ゴミの足切り
+            df = df[df['perimeter'] > 0]
+            df['circularity'] = (4 * np.pi * df['area']) / (df['perimeter'] ** 2)
             
-            if exclude_border:
-                masks = segmentation.clear_border(masks)
+            original_w, _ = Image.open(f).size
+            current_w, _ = img_raw.size
+            scale_factor = original_w / current_w
+            df['diameter_um'] = df['equivalent_diameter'] * um_per_pixel * scale_factor
             
-            props = measure.regionprops_table(masks, properties=['label', 'area', 'perimeter', 'equivalent_diameter'])
-            df = pd.DataFrame(props)
+            df_clean = df[df['circularity'] > circularity_threshold].copy()
             
-            if not df.empty:
-                df = df[df['perimeter'] > 0]
-                df['circularity'] = (4 * np.pi * df['area']) / (df['perimeter'] ** 2)
+            with col_res1:
+                fig, ax = plt.subplots()
+                ax.imshow(img_np)
+                # 輪郭の描画
+                ax.contour(labels > 0, colors='lime', linewidths=0.5)
+                ax.axis('off')
+                st.pyplot(fig)
                 
-                original_w, _ = Image.open(f).size
-                current_w, _ = img_raw.size
-                scale_factor = original_w / current_w
-                df['diameter_um'] = df['equivalent_diameter'] * um_per_pixel * scale_factor
-                
-                df_clean = df[df['circularity'] > circularity_threshold].copy()
-                
-                with col_res:
-                    fig, ax = plt.subplots()
-                    ax.imshow(img_display) 
-                    ax.contour(masks > 0, colors='lime', linewidths=0.5)
-                    ax.axis('off')
-                    st.pyplot(fig)
-                    st.metric("検出数", f"{len(df_clean)} 個")
-            else:
-                with col_res:
-                    st.warning("スフェアが一つも検出されませんでした。")
+            with col_res2:
+                st.metric("検出数", f"{len(df_clean)} 個")
+                if len(df_clean) > 0:
+                    st.metric("平均直径", f"{df_clean['diameter_um'].mean():.1f} μm")
+                    st.metric("平均真円度", f"{df_clean['circularity'].mean():.2f}")
+        else:
+            st.warning("検出されませんでした。")
