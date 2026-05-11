@@ -7,16 +7,14 @@ import io
 from cellpose import models
 from skimage import measure, segmentation
 
-st.set_page_config(page_title="Sphere Analyzer AI v6.1", layout="wide")
-st.title("🤖 スフェア自動計測ツール v6.1 (AI修正版)")
+st.set_page_config(page_title="Sphere Analyzer AI v6.2", layout="wide")
+st.title("🤖 スフェア自動計測ツール v6.2 (AI修正版)")
 
-# --- AIモデルのロード (エラー修正版) ---
 @st.cache_resource
 def load_ai_model():
-    # model_type='cyto' または 'nuclei' がスフェアには適しています
-    # device=torch.device('cpu') を明示的に指定してメモリ衝突を防ぎます
     import torch
     device = torch.device('cpu')
+    # ここを修正：最新のCellposeは models.CellposeModel または models.Cellpose を使用します
     return models.Cellpose(model_type='cyto', gpu=False, device=device)
 
 with st.sidebar:
@@ -40,19 +38,18 @@ if uploaded_file:
     img_raw = Image.open(uploaded_file).convert('RGB')
     img_np = np.array(img_raw)
     
-    # 解析実行
     if st.button("🚀 AI解析を開始"):
-        with st.spinner("AIが計算中...（数分かかる場合があります）"):
+        with st.spinner("AIが計算中..."):
             try:
                 model = load_ai_model()
-                # evalの引数を整理
+                # channels=[0,0] はグレースケール用
                 masks, flows, styles, diams = model.eval(
                     img_np, 
                     diameter=None if target_diam == 0 else target_diam,
                     channels=[0, 0],
                     flow_threshold=flow_threshold,
                     cellprob_threshold=chan_threshold,
-                    resample=False # メモリ節約のためFalseに
+                    resample=False
                 )
                 
                 if exclude_border:
@@ -63,11 +60,9 @@ if uploaded_file:
             except Exception as e:
                 st.error(f"解析中にエラーが発生しました: {e}")
 
-    # --- 表示エリア ---
     if 'ai_masks' in st.session_state:
         masks = st.session_state.ai_masks
         props = measure.regionprops(masks)
-        
         col_img, col_res = st.columns([1.5, 1])
         
         final_list = []
@@ -91,7 +86,6 @@ if uploaded_file:
         
         with col_img:
             st.pyplot(fig)
-        
         with col_res:
             df = pd.DataFrame(final_list)
             st.metric("検出数", f"{len(df)} 個")
