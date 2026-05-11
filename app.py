@@ -7,8 +7,8 @@ from skimage import color, filters, morphology, feature, segmentation, measure
 from scipy import ndimage as ndi
 from PIL import Image, ImageEnhance, ImageOps
 
-st.set_page_config(page_title="Sphere Analyzer v4.2", layout="wide")
-st.title("🔴 スフェア自動計測ツール v4.2 (計測数値連動版)")
+st.set_page_config(page_title="Sphere Analyzer v4.3", layout="wide")
+st.title("🔴 スフェア自動計測ツール v4.3 (計測ロジック可視化版)")
 
 with st.sidebar:
     st.header("1. 基本設定")
@@ -31,11 +31,11 @@ with st.sidebar:
         local_offset = st.slider("縁の拾いやすさ (Offset)", -0.10, 0.10, 0.00, step=0.01)
 
     st.header("4. 高精度ノイズ処理")
-    st.write("💡 スライダー右端の「数字」をクリックで手入力")
     remove_white = st.slider("⚪ 白いゴミ取り (背景ノイズ)", 0, 1000, 0, step=10)
     remove_black = st.slider("⚫ 黒いゴミ取り (内部の穴埋め)", 0, 200, 20, step=1)
 
     st.header("5. 切り離し (Watershed)")
+    st.info("💡 丸が重なってしまう(合体している)場合は、ここの数値を下げてください")
     min_dist = st.number_input("中心間の最小距離 (px)", value=30)
 
     st.header("6. 最終足切りフィルタ")
@@ -113,6 +113,7 @@ if uploaded_files:
                         'label': p.label,
                         'area': area,
                         'perimeter': perimeter,
+                        # ここで面積から逆算した直径を取得しています！
                         'equivalent_diameter_px': p.equivalent_diameter,
                         'actual_circularity': circ,
                         'centroid_y': p.centroid[0],
@@ -125,23 +126,21 @@ if uploaded_files:
         
         with col_res2:
             st.header("📊 結果・表示設定")
-            draw_style = st.radio("🟢 描画スタイル・計測モード", ("真円で近似する (AI風)", "ギザギザの実際の輪郭", "表示しない"), index=0)
+            draw_style = st.radio("🟢 描画スタイル・計測モード", ("真円で近似する (面積から逆算)", "ギザギザの実際の輪郭", "表示しない"), index=0)
             show_outline = (draw_style != "表示しない")
             
             if not df_base.empty:
-                if draw_style == "真円で近似する (AI風)":
-                    # 数値をAI風に補正
+                if draw_style == "真円で近似する (面積から逆算)":
                     display_count = len(df_base)
                     display_diameter = df_base['equivalent_diameter_px'].mean() * um_per_pixel * scale_factor
-                    display_circularity = 1.00 # 真円近似なので1.0固定
+                    display_circularity = 1.00
                 else:
-                    # 実際のギザギザの数値
                     display_count = len(df_base)
                     display_diameter = df_base['equivalent_diameter_px'].mean() * um_per_pixel * scale_factor
                     display_circularity = df_base['actual_circularity'].mean()
 
                 st.metric("検出数", f"{display_count} 個")
-                st.metric("平均直径", f"{display_diameter:.1f} μm")
+                st.metric("平均直径 (面積から逆算)", f"{display_diameter:.1f} μm")
                 st.metric("平均真円度", f"{display_circularity:.2f}")
             else:
                 st.warning("検出されませんでした。")
@@ -151,9 +150,9 @@ if uploaded_files:
             ax.imshow(img_np) 
             
             if not df_base.empty and show_outline:
-                if draw_style == "真円で近似する (AI風)":
+                if draw_style == "真円で近似する (面積から逆算)":
                     for _, row in df_base.iterrows():
-                        # equivalent_diameter（実面積から計算した直径）を使用して円を描画
+                        # equivalent_diameter（実面積から計算した直径）を使用して円を描画しています
                         r = row['equivalent_diameter_px'] / 2
                         circle = mpatches.Circle((row['centroid_x'], row['centroid_y']), r, 
                                                  fill=False, edgecolor='lime', linewidth=1.0)
