@@ -8,8 +8,8 @@ from PIL import Image, ImageEnhance, ImageOps
 from streamlit_image_coordinates import streamlit_image_coordinates as im_coordinates
 import io
 
-st.set_page_config(page_title="Sphere Analyzer v5.4", layout="wide")
-st.title("🔴 スフェア自動計測ツール v5.4")
+st.set_page_config(page_title="Sphere Analyzer v5.5", layout="wide")
+st.title("🔴 スフェア自動計測ツール v5.5")
 
 if 'bg_colors' not in st.session_state: st.session_state.bg_colors = []
 if 'manual_labels' not in st.session_state: st.session_state.manual_labels = None
@@ -35,16 +35,17 @@ with st.sidebar:
 
     st.header("3. 二値化設定")
     st.write(f"🎯 スポイト数: **{len(st.session_state.bg_colors)}** 点")
-    sensitivity = st.slider("色の許容範囲 (融通)", 1, 100, 6)
+    sensitivity = st.slider("色の許容範囲 (融通)", 1, 100, 15)
     
     st.header("4. ゴミ除去・穴埋め")
     remove_white = st.slider("⚪ 白ゴミ取り (背景ノイズ)", 0, 2000, 500, step=50)
-    remove_black = st.slider("⚫ 黒穴埋め (内部の穴)", 0, 5000, 1000, step=100)
+    remove_black = st.slider("⚫ 黒穴埋め (内部の穴)", 0, 10000, 2000, step=100)
 
     st.header("5. 切り離し ＆ フィルタ")
+    exclude_border = st.checkbox("画像端を除外 (復活)", value=True)
     watershed_footprint = st.slider("切り離し感度", 1, 100, 30)
     min_dist = st.slider("最小距離(px)", 1, 200, 30)
-    min_area = st.number_input("最小面積(px)", value=1000) # 内部ドットを消すため大きめに設定
+    min_area = st.number_input("最小面積(px)", value=1000)
     show_numbers = st.checkbox("番号を表示", value=True)
 
 uploaded_file = st.file_uploader("画像をアップロード", type=['jpg', 'png', 'jpeg'])
@@ -57,9 +58,8 @@ if uploaded_file:
     img_edit = ImageEnhance.Sharpness(img_edit).enhance(sharpness)
     img_np = np.array(img_edit)
 
-    # --- 背景スポイトモード ---
     if mode == "🧪 背景スポイト吸い取り":
-        st.subheader("背景を丁寧にクリックしてください。内部がブツブツになる場合は「ぼかし」を上げてください。")
+        st.subheader("背景をクリック。内部がブツブツなら「ぼかし」と「黒穴埋め」を上げてください。")
         coords = im_coordinates(img_edit, key="spoid")
         if coords:
             curr = (coords['x'], coords['y'])
@@ -70,18 +70,17 @@ if uploaded_file:
                 st.session_state.manual_labels = None 
                 st.rerun()
 
-    # --- 解析実行 ---
     if st.session_state.bg_colors and st.session_state.manual_labels is None:
         gray_img = color.rgb2gray(img_np)
         if blur_sigma > 0: gray_img = filters.gaussian(gray_img, sigma=blur_sigma)
-        
         diff_map = np.ones_like(gray_img)
         for bg_c in st.session_state.bg_colors:
             diff_map = np.minimum(diff_map, np.abs(gray_img - bg_c))
         binary = diff_map > (sensitivity / 255.0)
         
-        cleaned = morphology.remove_small_objects(binary, min_size=remove_white) if remove_white > 0 else binary
-        filled = morphology.remove_small_holes(cleaned, area_threshold=remove_black) if remove_black > 0 else cleaned
+        cleaned = morphology.remove_small_objects(binary, min_size=remove_white)
+        # 穴埋めをより確実に
+        filled = morphology.remove_small_holes(cleaned, area_threshold=remove_black)
         
         distance = ndi.distance_transform_edt(filled)
         local_maxi = feature.peak_local_max(distance, min_distance=min_dist, 
@@ -90,24 +89,25 @@ if uploaded_file:
         mask = np.zeros(distance.shape, dtype=bool)
         mask[tuple(local_maxi.T)] = True
         markers, _ = ndi.label(mask)
-        st.session_state.manual_labels = segmentation.watershed(-distance, markers, mask=filled)
+        labels = segmentation.watershed(-distance, markers, mask=filled)
+        
+        if exclude_border:
+            labels = segmentation.clear_border(labels)
+        st.session_state.manual_labels = labels
 
     col_img, col_res = st.columns([1.5, 1])
 
     with col_img:
         if mode == "裁断 ✂️ 手動切り離し・削除" and st.session_state.manual_labels is not None:
-            st.subheader("くびれをクリックして分離。スフェアの外側をクリックしてもエラーになりません。")
             fig_f, ax_f = plt.subplots()
             ax_f.imshow(img_np)
             ax_f.contour(st.session_state.manual_labels > 0, colors='lime', linewidths=0.5)
             ax_f.axis('off')
-            
             buf = io.BytesIO()
             fig_f.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
             buf.seek(0)
             fix_img = Image.open(buf)
             plt.close(fig_f)
-            
             coords_fix = im_coordinates(fix_img, key="fix")
             if coords_fix:
                 curr_f = (coords_fix['x'], coords_fix['y'])
@@ -116,10 +116,9 @@ if uploaded_file:
                     data_h, data_w = st.session_state.manual_labels.shape
                     tx = int(coords_fix['x'] * data_w / fix_img.size[0])
                     ty = int(coords_fix['y'] * data_h / fix_img.size[1])
-                    
                     if 0 <= ty < data_h and 0 <= tx < data_w:
                         l_val = st.session_state.manual_labels[ty, tx]
-                        if l_val > 0: # スフェアが存在する場合のみ処理（空振りガード）
+                        if l_val > 0:
                             rr, cc = morphology.disk((ty, tx), 3, shape=(data_h, data_w))
                             st.session_state.manual_labels[rr, cc] = 0
                             remaining = st.session_state.manual_labels == l_val
