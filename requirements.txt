@@ -4,3 +4,5 @@ pandas
 scikit-image
 matplotlib
 streamlit-image-coordinates
+cellpose
+torch
