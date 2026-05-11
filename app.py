@@ -4,12 +4,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from skimage import color, filters, morphology, feature, segmentation, measure
 from scipy import ndimage as ndi
-import io as python_io
 from PIL import Image, ImageEnhance, ImageOps
 import cv2
 
-st.set_page_config(page_title="Sphere Analyzer v3.5", layout="wide")
-st.title("🔴 スフェア自動計測ツール v3.5 (隠しフィルター全解放版)")
+st.set_page_config(page_title="Sphere Analyzer v3.6", layout="wide")
+st.title("🔴 スフェア自動計測ツール v3.6 (高精度ノイズ除去版)")
 
 with st.sidebar:
     st.header("1. 基本設定")
@@ -22,22 +21,19 @@ with st.sidebar:
     sharpness = st.slider("シャープネス", 0.0, 5.0, 1.0)
 
     st.header("3. 二値化 (くり抜きモード)")
-    # 今回の目玉：抽出方法の選択
     extraction_mode = st.radio("抽出方法:", ("背景を一気にくり抜く (おすすめ)", "細かい影を拾う (従来)"), index=0)
-    
-    blur_sigma = st.slider("ぼかし強さ (ノイズ消し)", 0.0, 10.0, 0.0, help="背景を滑らかにして分離しやすくします")
+    blur_sigma = st.slider("ぼかし強さ", 0.0, 10.0, 0.0)
     
     if extraction_mode == "背景を一気にくり抜く (おすすめ)":
-        # 隠していたパラメータを解放
         global_offset = st.slider("背景の判定ライン (閾値微調整)", -0.30, 0.30, 0.00, step=0.01)
     else:
         block_size_slider = st.slider("二値化の細かさ (Block Size)", 11, 201, 51, step=10)
         local_offset = st.slider("縁の拾いやすさ (Offset)", -0.10, 0.10, 0.00, step=0.01)
 
-    st.header("4. ノイズ処理 (ImageJ機能)")
-    # 追加：隠していたゴミ取りと穴埋めを解放
-    noise_removal = st.slider("ゴミ取り (最小ピクセル数)", 0, 500, 50, help="この数値以下の小さな点を消去します")
-    fill_holes = st.checkbox("スフェア内部の穴埋めを実行", value=True, help="ザラザラを潰して一つの塊にします")
+    st.header("4. 高精度ノイズ処理")
+    st.write("※数値を上げるほど大きなゴミを消します")
+    remove_white = st.slider("⚪ 白いゴミ取り (背景のノイズ消し)", 0, 5000, 50, step=10)
+    remove_black = st.slider("⚫ 黒いゴミ取り (内部のザラザラ埋め)", 0, 5000, 0, step=10, help="数値を上げるとスフェア内部の黒い穴だけを塗りつぶします")
 
     st.header("5. 切り離し (Watershed)")
     min_dist = st.number_input("中心間の最小距離 (px)", value=30)
@@ -46,6 +42,9 @@ with st.sidebar:
     exclude_border = st.checkbox("画像端を除外", value=True)
     min_area = st.number_input("最小面積 (px)", value=100)
     circularity_threshold = st.slider("真円度しきい値", 0.0, 1.0, 0.6)
+    
+    st.header("7. 表示設定")
+    show_outline = st.checkbox("緑の線を表示する", value=True)
 
 uploaded_files = st.file_uploader("ドロップ", type=['jpg', 'png', 'jpeg'], accept_multiple_files=True)
 
@@ -71,7 +70,6 @@ if uploaded_files:
         else:
             blurred = gray
 
-        # 二値化のロジック分岐
         if extraction_mode == "背景を一気にくり抜く (おすすめ)":
             base_thresh = filters.threshold_otsu(blurred)
             adj_thresh = base_thresh + global_offset
@@ -89,15 +87,15 @@ if uploaded_files:
             else:
                 binary = blurred < local_thresh 
             
-        # 表に出した「ゴミ取り機能」
-        if noise_removal > 0:
-            cleaned = morphology.remove_small_objects(binary, min_size=noise_removal)
+        # 1. 白いゴミ取り（背景のノイズ除去）
+        if remove_white > 0:
+            cleaned = morphology.remove_small_objects(binary, min_size=remove_white)
         else:
             cleaned = binary
 
-        # 表に出した「穴埋め機能」
-        if fill_holes:
-            filled = ndi.binary_fill_holes(cleaned)
+        # 2. 黒いゴミ取り（スフェア内部の穴埋め）
+        if remove_black > 0:
+            filled = morphology.remove_small_holes(cleaned, area_threshold=remove_black)
         else:
             filled = cleaned
         
@@ -119,9 +117,9 @@ if uploaded_files:
             with col_a:
                 st.image(img_edit, caption="0. 補正後の画像", use_container_width=True)
             with col_b:
-                st.image(binary.astype(float), caption="1. 二値化 (すべて拾った状態)", use_container_width=True)
+                st.image(binary.astype(float), caption="1. 二値化直後", use_container_width=True)
             with col_c:
-                st.image(filled.astype(float), caption="2. ゴミ取り＆穴埋め後", use_container_width=True)
+                st.image(filled.astype(float), caption="2. 白/黒ゴミ取り後", use_container_width=True)
 
         props = measure.regionprops_table(labels, properties=['label', 'area', 'perimeter', 'equivalent_diameter'])
         df = pd.DataFrame(props)
@@ -143,7 +141,11 @@ if uploaded_files:
             with col_res1:
                 fig, ax = plt.subplots()
                 ax.imshow(img_np) 
-                ax.contour(labels > 0, colors='lime', linewidths=0.5)
+                
+                # 緑の線のON/OFF
+                if show_outline:
+                    ax.contour(labels > 0, colors='lime', linewidths=0.5)
+                
                 ax.axis('off')
                 st.pyplot(fig)
                 
