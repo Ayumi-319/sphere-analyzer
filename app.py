@@ -10,8 +10,8 @@ import torch
 import cv2
 import gc
 
-st.set_page_config(page_title="Sphere Analyzer v2.13", layout="wide")
-st.title("🔴 スフェア自動計測ツール v2.13 (エッジ抽出特化版)")
+st.set_page_config(page_title="Sphere Analyzer v2.15", layout="wide")
+st.title("🔴 スフェア自動計測ツール v2.15 (爆速テストモード搭載)")
 
 @st.cache_resource
 def get_model(m_type):
@@ -26,17 +26,19 @@ with st.sidebar:
     um_per_pixel = 3.23 if mag == "4x" else 1.28 if mag == "10x" else st.number_input("μm/px", value=1.0)
 
     st.header("2. AIを助ける前処理 (即時)")
-    # CLAHE（局所コントラスト）スライダー
-    clahe_clip = st.slider("縁のクッキリ度 (CLAHE)", 0.0, 10.0, 3.0, help="数値を上げると、スフェアの境界線が濃く浮き出ます")
+    clahe_clip = st.slider("縁のクッキリ度 (CLAHE)", 0.0, 10.0, 3.0)
     invert_image = st.checkbox("画像を白黒反転する", value=True)
     
     with st.form("ai_settings_form"):
         st.header("3. AI解析設定")
+        
+        # 新機能：テストモード
+        test_mode = st.checkbox("⚡ テストモード (中央部分だけを爆速で解析)", value=True, help="条件出しの時はON、全体を解析する時はOFFにしてください")
+        
         model_choice = st.radio("AIモデル:", ("cyto2", "nuclei"), index=0)
-        target_diameter = st.number_input("予想直径 (px)", value=80)
+        target_diameter = st.number_input("予想直径 (px) ※0で自動推定", value=0, help="0にするとAIが自動で最適なサイズを探します")
         flow_threshold = st.slider("切り離し強度", 0.0, 1.1, 0.9)
-        # 検出感度を少し下げられるように範囲を調整
-        cellprob_threshold = st.slider("検出感度", -6.0, 6.0, -1.0)
+        cellprob_threshold = st.slider("検出感度", -6.0, 6.0, 0.0, help="プラスにすると厳しく(縮む)、マイナスにすると甘く(広がる)なります")
         
         submit_btn = st.form_submit_button("🚀 この設定でAI解析を実行")
 
@@ -48,11 +50,12 @@ uploaded_files = st.file_uploader("ドロップ", type=['jpg', 'png', 'jpeg'], a
 
 if uploaded_files:
     for f in uploaded_files:
+        # 画像の読み込みとベースの軽量化
         img_raw = Image.open(f).convert('RGB')
         img_raw.thumbnail((800, 800), Image.Resampling.LANCZOS)
         img_np = np.array(img_raw)
         
-        # CLAHE (局所コントラスト強調) の適用
+        # CLAHE
         if clahe_clip > 0:
             lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
             l, a, b = cv2.split(lab)
@@ -64,14 +67,27 @@ if uploaded_files:
         # 白黒反転
         if invert_image:
             img_np = cv2.bitwise_not(img_np)
+            
+        # ⚡ テストモードのクロップ（切り抜き）処理
+        if test_mode:
+            h, w = img_np.shape[:2]
+            # 中央の1/4の面積を切り抜く
+            sy, ey = int(h*0.25), int(h*0.75)
+            sx, ex = int(w*0.25), int(w*0.75)
+            img_process = img_np[sy:ey, sx:ex]
+            img_display = np.array(img_raw)[sy:ey, sx:ex]
+        else:
+            img_process = img_np
+            img_display = np.array(img_raw)
         
         st.subheader(f"解析: {f.name}")
         col_pre, col_res = st.columns(2)
         
         with col_pre:
-            st.image(img_np, caption="AIが実際に見ている画像（縁が強調されているか確認）", use_container_width=True, channels="RGB")
+            st.image(img_process, caption="AIが実際に見ている画像", use_container_width=True, channels="RGB")
 
-        cache_key = f"{f.name}_{clahe_clip}_{invert_image}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
+        # キャッシュキーにテストモードの状態も含める
+        cache_key = f"{f.name}_{clahe_clip}_{invert_image}_{test_mode}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
 
         if submit_btn or cache_key in st.session_state.masks_cache:
             if cache_key not in st.session_state.masks_cache:
@@ -79,8 +95,11 @@ if uploaded_files:
                     model_name = 'cyto2' if model_choice == "cyto2" else 'nuclei'
                     model = get_model(model_name)
                     
-                    masks, _, _ = model.eval(img_np, 
-                                             diameter=target_diameter, 
+                    # diameter=0 の場合は None に変換して自動推定させる
+                    diam = None if target_diameter == 0 else target_diameter
+                    
+                    masks, _, _ = model.eval(img_process, 
+                                             diameter=diam, 
                                              flow_threshold=flow_threshold,
                                              cellprob_threshold=cellprob_threshold,
                                              channels=[0,0])
@@ -108,13 +127,11 @@ if uploaded_files:
                 
                 with col_res:
                     fig, ax = plt.subplots()
-                    ax.imshow(np.array(img_raw)) 
+                    ax.imshow(img_display) 
                     ax.contour(masks > 0, colors='lime', linewidths=0.5)
                     ax.axis('off')
                     st.pyplot(fig)
                     st.metric("検出数", f"{len(df_clean)} 個")
-                    st.metric("平均直径", f"{df_clean['diameter_um'].mean():.1f} μm")
-                    st.metric("平均真円度", f"{df_clean['circularity'].mean():.2f}")
             else:
                 with col_res:
                     st.warning("スフェアが一つも検出されませんでした。")
