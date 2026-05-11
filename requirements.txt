@@ -1,7 +1,5 @@
 streamlit
-cellpose
-scikit-image
-matplotlib
+numpy
 pandas
-openpyxl
-python-pptx
+scikit-image
+streamlit-image-coordinates
