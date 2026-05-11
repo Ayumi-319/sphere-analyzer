@@ -7,8 +7,8 @@ from skimage import color, filters, morphology, feature, segmentation, measure
 from scipy import ndimage as ndi
 from PIL import Image, ImageEnhance, ImageOps
 
-st.set_page_config(page_title="Sphere Analyzer v4.1", layout="wide")
-st.title("🔴 スフェア自動計測ツール v4.1 (真円フィッティング版)")
+st.set_page_config(page_title="Sphere Analyzer v4.2", layout="wide")
+st.title("🔴 スフェア自動計測ツール v4.2 (計測数値連動版)")
 
 with st.sidebar:
     st.header("1. 基本設定")
@@ -53,7 +53,6 @@ if uploaded_files:
         img_edit = img_raw.copy()
         if invert_image:
             img_edit = ImageOps.invert(img_edit)
-            
         enhancer_c = ImageEnhance.Contrast(img_edit)
         img_edit = enhancer_c.enhance(contrast)
         enhancer_s = ImageEnhance.Sharpness(img_edit)
@@ -70,33 +69,18 @@ if uploaded_files:
         if extraction_mode == "背景を一気にくり抜く (おすすめ)":
             base_thresh = filters.threshold_otsu(blurred)
             adj_thresh = base_thresh + global_offset
-            if invert_image:
-                binary = blurred > adj_thresh
-            else:
-                binary = blurred < adj_thresh
+            binary = blurred > adj_thresh if invert_image else blurred < adj_thresh
         else:
             block_size = int(block_size_slider)
-            if block_size % 2 == 0:
-                block_size += 1
+            if block_size % 2 == 0: block_size += 1
             local_thresh = filters.threshold_local(blurred, block_size, offset=local_offset)
-            if invert_image:
-                binary = blurred > local_thresh
-            else:
-                binary = blurred < local_thresh 
+            binary = blurred > local_thresh if invert_image else blurred < local_thresh 
             
-        if remove_white > 0:
-            cleaned = morphology.remove_small_objects(binary, min_size=remove_white)
-        else:
-            cleaned = binary
-
-        if remove_black > 0:
-            filled = morphology.remove_small_holes(cleaned, area_threshold=remove_black)
-        else:
-            filled = cleaned
+        cleaned = morphology.remove_small_objects(binary, min_size=remove_white) if remove_white > 0 else binary
+        filled = morphology.remove_small_holes(cleaned, area_threshold=remove_black) if remove_black > 0 else cleaned
         
         distance = ndi.distance_transform_edt(filled)
         coords = feature.peak_local_max(distance, min_distance=min_dist, labels=filled)
-        
         mask = np.zeros(distance.shape, dtype=bool)
         mask[tuple(coords.T)] = True
         markers, _ = ndi.label(mask)
@@ -109,16 +93,12 @@ if uploaded_files:
         
         with st.expander("🔍 途中経過（補正・二値化・ゴミ取り・穴埋め）を見る"):
             col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                st.image(img_edit, caption="0. 補正後の画像", use_container_width=True)
-            with col_b:
-                st.image(binary.astype(float), caption="1. 二値化直後", use_container_width=True)
-            with col_c:
-                st.image(filled.astype(float), caption="2. 白/黒ゴミ取り後", use_container_width=True)
+            with col_a: st.image(img_edit, caption="0. 補正後の画像", use_container_width=True)
+            with col_b: st.image(binary.astype(float), caption="1. 二値化直後", use_container_width=True)
+            with col_c: st.image(filled.astype(float), caption="2. 白/黒ゴミ取り後", use_container_width=True)
 
         props = measure.regionprops(labels)
-        df_list = []
-        
+        df_raw = []
         original_w, _ = Image.open(f).size
         current_w, _ = img_raw.size
         scale_factor = original_w / current_w
@@ -129,48 +109,62 @@ if uploaded_files:
             if perimeter > 0 and area >= min_area:
                 circ = (4 * np.pi * area) / (perimeter ** 2)
                 if circ > circularity_threshold:
-                    diam_um = p.equivalent_diameter * um_per_pixel * scale_factor
-                    df_list.append({
+                    df_raw.append({
                         'label': p.label,
                         'area': area,
                         'perimeter': perimeter,
-                        'equivalent_diameter': p.equivalent_diameter,
-                        'circularity': circ,
-                        'diameter_um': diam_um,
+                        'equivalent_diameter_px': p.equivalent_diameter,
+                        'actual_circularity': circ,
                         'centroid_y': p.centroid[0],
                         'centroid_x': p.centroid[1]
                     })
-
-        df_clean = pd.DataFrame(df_list)
+        
+        df_base = pd.DataFrame(df_raw)
         
         col_res1, col_res2 = st.columns([2, 1])
         
         with col_res2:
-            draw_style = st.radio("🟢 描画スタイル", ("真円で近似する (AI風)", "ギザギザの実際の輪郭", "表示しない"), index=0)
-            st.metric("検出数", f"{len(df_clean)} 個" if not df_clean.empty else "0 個")
-            if not df_clean.empty:
-                st.metric("平均直径", f"{df_clean['diameter_um'].mean():.1f} μm")
-                st.metric("平均真円度", f"{df_clean['circularity'].mean():.2f}")
+            st.header("📊 結果・表示設定")
+            draw_style = st.radio("🟢 描画スタイル・計測モード", ("真円で近似する (AI風)", "ギザギザの実際の輪郭", "表示しない"), index=0)
+            show_outline = (draw_style != "表示しない")
+            
+            if not df_base.empty:
+                if draw_style == "真円で近似する (AI風)":
+                    # 数値をAI風に補正
+                    display_count = len(df_base)
+                    display_diameter = df_base['equivalent_diameter_px'].mean() * um_per_pixel * scale_factor
+                    display_circularity = 1.00 # 真円近似なので1.0固定
+                else:
+                    # 実際のギザギザの数値
+                    display_count = len(df_base)
+                    display_diameter = df_base['equivalent_diameter_px'].mean() * um_per_pixel * scale_factor
+                    display_circularity = df_base['actual_circularity'].mean()
+
+                st.metric("検出数", f"{display_count} 個")
+                st.metric("平均直径", f"{display_diameter:.1f} μm")
+                st.metric("平均真円度", f"{display_circularity:.2f}")
+            else:
+                st.warning("検出されませんでした。")
                 
         with col_res1:
             fig, ax = plt.subplots()
             ax.imshow(img_np) 
             
-            if not df_clean.empty:
+            if not df_base.empty and show_outline:
                 if draw_style == "真円で近似する (AI風)":
-                    # スフェアの中心と直径から、数学的に完璧な丸を描く
-                    for _, row in df_clean.iterrows():
-                        r = row['equivalent_diameter'] / 2
+                    for _, row in df_base.iterrows():
+                        # equivalent_diameter（実面積から計算した直径）を使用して円を描画
+                        r = row['equivalent_diameter_px'] / 2
                         circle = mpatches.Circle((row['centroid_x'], row['centroid_y']), r, 
                                                  fill=False, edgecolor='lime', linewidth=1.0)
                         ax.add_patch(circle)
                 elif draw_style == "ギザギザの実際の輪郭":
-                    # 以前見えていなかった「スフェア同士の境界線」も描画するように修正
-                    valid_labels = df_clean['label'].values
+                    valid_labels = df_base['label'].values
                     valid_mask = np.isin(labels, valid_labels)
                     filtered_labels = np.where(valid_mask, labels, 0)
                     if filtered_labels.max() > 0:
-                        ax.contour(filtered_labels, levels=np.arange(filtered_labels.max() + 1) + 0.5, colors='lime', linewidths=0.5)
+                        ax.contour(filtered_labels, levels=np.arange(filtered_labels.max() + 1) + 0.5, 
+                                   colors='lime', linewidths=0.5)
             
             ax.axis('off')
             st.pyplot(fig)
