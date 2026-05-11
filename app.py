@@ -10,8 +10,8 @@ import torch
 import cv2
 import gc
 
-st.set_page_config(page_title="Sphere Analyzer v2.12", layout="wide")
-st.title("🔴 スフェア自動計測ツール v2.12 (プレビュー修正版)")
+st.set_page_config(page_title="Sphere Analyzer v2.13", layout="wide")
+st.title("🔴 スフェア自動計測ツール v2.13 (エッジ抽出特化版)")
 
 @st.cache_resource
 def get_model(m_type):
@@ -25,22 +25,22 @@ with st.sidebar:
     mag = st.radio("倍率:", ("4x", "10x", "カスタム"), index=0)
     um_per_pixel = 3.23 if mag == "4x" else 1.28 if mag == "10x" else st.number_input("μm/px", value=1.0)
 
-    # 「前処理」はフォームの外に出して即時反映させる
-    st.header("2. AIを助ける前処理 (即時プレビュー)")
+    st.header("2. AIを助ける前処理 (即時)")
+    # CLAHE（局所コントラスト）スライダー
+    clahe_clip = st.slider("縁のクッキリ度 (CLAHE)", 0.0, 10.0, 3.0, help="数値を上げると、スフェアの境界線が濃く浮き出ます")
     invert_image = st.checkbox("画像を白黒反転する", value=True)
-    blur_strength = st.slider("ぼかし (内部模様を消す)", 0, 10, 3, help="数値を上げるとスフェア内部がのっぺりし、縁だけが残ります")
     
-    # AIの計算設定だけをフォームに入れる（再計算を防ぐため）
     with st.form("ai_settings_form"):
         st.header("3. AI解析設定")
         model_choice = st.radio("AIモデル:", ("cyto2", "nuclei"), index=0)
-        target_diameter = st.number_input("予想直径 (px)", value=100)
+        target_diameter = st.number_input("予想直径 (px)", value=80)
         flow_threshold = st.slider("切り離し強度", 0.0, 1.1, 0.9)
-        cellprob_threshold = st.slider("検出感度", -6.0, 6.0, 0.0)
+        # 検出感度を少し下げられるように範囲を調整
+        cellprob_threshold = st.slider("検出感度", -6.0, 6.0, -1.0)
         
         submit_btn = st.form_submit_button("🚀 この設定でAI解析を実行")
 
-    st.header("4. フィルタ設定 (即時反映)")
+    st.header("4. フィルタ設定 (即時)")
     exclude_border = st.checkbox("画像端を除外", value=True)
     circularity_threshold = st.slider("真円度しきい値", 0.0, 1.0, 0.7)
 
@@ -50,25 +50,28 @@ if uploaded_files:
     for f in uploaded_files:
         img_raw = Image.open(f).convert('RGB')
         img_raw.thumbnail((800, 800), Image.Resampling.LANCZOS)
+        img_np = np.array(img_raw)
         
-        img_edit = img_raw.copy()
+        # CLAHE (局所コントラスト強調) の適用
+        if clahe_clip > 0:
+            lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(8,8))
+            cl = clahe.apply(l)
+            limg = cv2.merge((cl,a,b))
+            img_np = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB)
+
+        # 白黒反転
         if invert_image:
-            img_edit = ImageOps.invert(img_edit)
-            
-        img_np = np.array(img_edit)
-        
-        # ぼかし処理の適用
-        if blur_strength > 0:
-            k = blur_strength * 2 + 1  
-            img_np = cv2.GaussianBlur(img_np, (k, k), 0)
+            img_np = cv2.bitwise_not(img_np)
         
         st.subheader(f"解析: {f.name}")
         col_pre, col_res = st.columns(2)
         
         with col_pre:
-            st.image(img_np, caption="AIが実際に見ている画像（ぼかし適用後）", use_container_width=True, channels="RGB")
+            st.image(img_np, caption="AIが実際に見ている画像（縁が強調されているか確認）", use_container_width=True, channels="RGB")
 
-        cache_key = f"{f.name}_{invert_image}_{blur_strength}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
+        cache_key = f"{f.name}_{clahe_clip}_{invert_image}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
 
         if submit_btn or cache_key in st.session_state.masks_cache:
             if cache_key not in st.session_state.masks_cache:
