@@ -10,8 +10,8 @@ import torch
 import cv2
 import gc
 
-st.set_page_config(page_title="Sphere Analyzer v2.11", layout="wide")
-st.title("🔴 スフェア自動計測ツール v2.11 (ぼかし機能追加版)")
+st.set_page_config(page_title="Sphere Analyzer v2.12", layout="wide")
+st.title("🔴 スフェア自動計測ツール v2.12 (プレビュー修正版)")
 
 @st.cache_resource
 def get_model(m_type):
@@ -25,12 +25,13 @@ with st.sidebar:
     mag = st.radio("倍率:", ("4x", "10x", "カスタム"), index=0)
     um_per_pixel = 3.23 if mag == "4x" else 1.28 if mag == "10x" else st.number_input("μm/px", value=1.0)
 
+    # 「前処理」はフォームの外に出して即時反映させる
+    st.header("2. AIを助ける前処理 (即時プレビュー)")
+    invert_image = st.checkbox("画像を白黒反転する", value=True)
+    blur_strength = st.slider("ぼかし (内部模様を消す)", 0, 10, 3, help="数値を上げるとスフェア内部がのっぺりし、縁だけが残ります")
+    
+    # AIの計算設定だけをフォームに入れる（再計算を防ぐため）
     with st.form("ai_settings_form"):
-        st.header("2. AIを助ける前処理")
-        invert_image = st.checkbox("画像を白黒反転する", value=True)
-        # 新機能：ぼかし（ガウスフィルター）
-        blur_strength = st.slider("ぼかし (内部模様を消す)", 0, 10, 3, help="数値を上げるとスフェア内部がのっぺりし、縁だけが残ります")
-        
         st.header("3. AI解析設定")
         model_choice = st.radio("AIモデル:", ("cyto2", "nuclei"), index=0)
         target_diameter = st.number_input("予想直径 (px)", value=100)
@@ -58,14 +59,13 @@ if uploaded_files:
         
         # ぼかし処理の適用
         if blur_strength > 0:
-            k = blur_strength * 2 + 1  # カーネルサイズ（奇数にする）
+            k = blur_strength * 2 + 1  
             img_np = cv2.GaussianBlur(img_np, (k, k), 0)
         
         st.subheader(f"解析: {f.name}")
         col_pre, col_res = st.columns(2)
         
         with col_pre:
-            # プレビューにもぼかし結果を表示
             st.image(img_np, caption="AIが実際に見ている画像（ぼかし適用後）", use_container_width=True, channels="RGB")
 
         cache_key = f"{f.name}_{invert_image}_{blur_strength}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
