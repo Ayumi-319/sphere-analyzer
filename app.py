@@ -2,19 +2,22 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from PIL import Image, ImageEnhance
+from PIL import Image
 import io
 from cellpose import models
-import torch
+from skimage import measure, segmentation
 
-st.set_page_config(page_title="Sphere Analyzer AI v6.0", layout="wide")
-st.title("🤖 スフェア自動計測ツール v6.0 (AI搭載版)")
+st.set_page_config(page_title="Sphere Analyzer AI v6.1", layout="wide")
+st.title("🤖 スフェア自動計測ツール v6.1 (AI修正版)")
 
-# --- AIモデルのロード (キャッシュして高速化) ---
+# --- AIモデルのロード (エラー修正版) ---
 @st.cache_resource
 def load_ai_model():
-    # 'cyto' モデルを使用（丸い物体の認識に強い）
-    return models.Cellpose(gpu=False, model_type='cyto')
+    # model_type='cyto' または 'nuclei' がスフェアには適しています
+    # device=torch.device('cpu') を明示的に指定してメモリ衝突を防ぎます
+    import torch
+    device = torch.device('cpu')
+    return models.Cellpose(model_type='cyto', gpu=False, device=device)
 
 with st.sidebar:
     st.header("1. スケール設定")
@@ -22,13 +25,9 @@ with st.sidebar:
     um_per_pixel = {"4x": 1.9109, "10x": 0.7643, "20x": 0.3817}.get(mag, 1.0)
 
     st.header("2. AI解析設定")
-    st.info("💡 古典的な補正は不要。AIが直接形を見抜きます。")
-    # AIが探すべき物体の大きさ（px）
-    target_diam = st.number_input("予想直径 (px) ※0で自動計算", value=0)
-    # 検出の感度（高いほどたくさん拾う）
-    chan_threshold = st.slider("検出感度 (Cellprob Threshold)", -6.0, 6.0, 0.0)
-    # 切り離しの強さ（高いほど細かく分ける）
-    flow_threshold = st.slider("切り離し強度 (Flow Threshold)", 0.0, 1.0, 0.4)
+    target_diam = st.number_input("予想直径 (px) ※0で自動", value=0)
+    chan_threshold = st.slider("検出感度", -6.0, 6.0, 0.0)
+    flow_threshold = st.slider("切り離し強度", 0.0, 1.0, 0.4)
 
     st.header("3. フィルタ ＆ 表示")
     exclude_border = st.checkbox("画像端を除外", value=True)
@@ -41,36 +40,32 @@ if uploaded_file:
     img_raw = Image.open(uploaded_file).convert('RGB')
     img_np = np.array(img_raw)
     
-    # 解析実行ボタン
-    if st.button("🚀 AI解析を開始（少し時間がかかります）"):
-        with st.spinner("AIがスフェアの形を「思考」しています..."):
-            model = load_ai_model()
-            
-            # AI解析実行
-            # channels=[0,0] はグレースケールとして処理することを意味します
-            masks, flows, styles, diams = model.eval(
-                img_np, 
-                diameter=None if target_diam == 0 else target_diam,
-                channels=[0, 0],
-                flow_threshold=flow_threshold,
-                cellprob_threshold=chan_threshold,
-                resample=True
-            )
-            
-            # 画像端の除去
-            if exclude_border:
-                from skimage.segmentation import clear_border
-                masks = clear_border(masks)
-            
-            st.session_state.ai_masks = masks
-            st.success("解析完了！")
+    # 解析実行
+    if st.button("🚀 AI解析を開始"):
+        with st.spinner("AIが計算中...（数分かかる場合があります）"):
+            try:
+                model = load_ai_model()
+                # evalの引数を整理
+                masks, flows, styles, diams = model.eval(
+                    img_np, 
+                    diameter=None if target_diam == 0 else target_diam,
+                    channels=[0, 0],
+                    flow_threshold=flow_threshold,
+                    cellprob_threshold=chan_threshold,
+                    resample=False # メモリ節約のためFalseに
+                )
+                
+                if exclude_border:
+                    masks = segmentation.clear_border(masks)
+                
+                st.session_state.ai_masks = masks
+                st.success("解析完了！")
+            except Exception as e:
+                st.error(f"解析中にエラーが発生しました: {e}")
 
-    # --- 結果表示 ---
+    # --- 表示エリア ---
     if 'ai_masks' in st.session_state:
         masks = st.session_state.ai_masks
-        props = measure.regionprops(masks) if 'measure' in locals() else []
-        # regionpropsのために追加インポートが必要な場合
-        from skimage import measure
         props = measure.regionprops(masks)
         
         col_img, col_res = st.columns([1.5, 1])
@@ -82,18 +77,16 @@ if uploaded_file:
         idx = 1
         for p in props:
             if p.area >= min_area:
-                # 番号表示
                 if show_numbers:
-                    ax.text(p.centroid[1], p.centroid[0], str(idx), color='red', fontsize=8, fontweight='bold', ha='center')
-                
+                    ax.text(p.centroid[1], p.centroid[0], str(idx), color='red', fontsize=7, fontweight='bold', ha='center')
                 final_list.append({
                     'No': idx,
                     '直径(μm)': p.equivalent_diameter * um_per_pixel,
-                    '真円度': (4 * np.pi * p.area) / (p.perimeter ** 2) if p.perimeter > 0 else 0
+                    '面積(px)': p.area
                 })
                 idx += 1
         
-        ax.contour(masks > 0, colors='lime', linewidths=0.8)
+        ax.contour(masks > 0, colors='lime', linewidths=0.5)
         ax.axis('off')
         
         with col_img:
@@ -101,8 +94,8 @@ if uploaded_file:
         
         with col_res:
             df = pd.DataFrame(final_list)
-            st.metric("AI検出数", f"{len(df)} 個")
+            st.metric("検出数", f"{len(df)} 個")
             if not df.empty:
-                st.metric("平均直径", f"{df['直径(μm)'].mean():.2f} μm")
-                st.dataframe(df)
-                st.download_button("CSV保存", df.to_csv(index=False).encode('utf-8'), "ai_result.csv")
+                st.dataframe(df, height=400)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("結果をCSV保存", csv, "ai_result.csv")
