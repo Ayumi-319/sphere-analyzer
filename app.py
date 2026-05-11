@@ -10,8 +10,8 @@ import torch
 import cv2
 import gc
 
-st.set_page_config(page_title="Sphere Analyzer v2.10", layout="wide")
-st.title("🔴 スフェア自動計測ツール v2.10 (パラメータ調整特化版)")
+st.set_page_config(page_title="Sphere Analyzer v2.11", layout="wide")
+st.title("🔴 スフェア自動計測ツール v2.11 (ぼかし機能追加版)")
 
 @st.cache_resource
 def get_model(m_type):
@@ -25,20 +25,21 @@ with st.sidebar:
     mag = st.radio("倍率:", ("4x", "10x", "カスタム"), index=0)
     um_per_pixel = 3.23 if mag == "4x" else 1.28 if mag == "10x" else st.number_input("μm/px", value=1.0)
 
-    # AIの設定を「フォーム」で囲み、ボタンを押すまで再計算が走らないようにする
     with st.form("ai_settings_form"):
-        st.header("2. AI解析設定 (要・再計算)")
-        invert_image = st.checkbox("画像を白黒反転する (必須)", value=True)
-        model_choice = st.radio("AIモデル:", ("cyto2", "nuclei"), index=0)
-        target_diameter = st.number_input("予想直径 (px)", value=100, help="実際の見た目に近いサイズにすると精度が上がります")
+        st.header("2. AIを助ける前処理")
+        invert_image = st.checkbox("画像を白黒反転する", value=True)
+        # 新機能：ぼかし（ガウスフィルター）
+        blur_strength = st.slider("ぼかし (内部模様を消す)", 0, 10, 3, help="数値を上げるとスフェア内部がのっぺりし、縁だけが残ります")
         
-        # 初期値を高めに設定しました
-        flow_threshold = st.slider("切り離し強度", 0.0, 1.1, 0.9, help="合体してしまう場合は0.9〜1.0に上げてください")
+        st.header("3. AI解析設定")
+        model_choice = st.radio("AIモデル:", ("cyto2", "nuclei"), index=0)
+        target_diameter = st.number_input("予想直径 (px)", value=100)
+        flow_threshold = st.slider("切り離し強度", 0.0, 1.1, 0.9)
         cellprob_threshold = st.slider("検出感度", -6.0, 6.0, 0.0)
         
         submit_btn = st.form_submit_button("🚀 この設定でAI解析を実行")
 
-    st.header("3. フィルタ設定 (即時反映)")
+    st.header("4. フィルタ設定 (即時反映)")
     exclude_border = st.checkbox("画像端を除外", value=True)
     circularity_threshold = st.slider("真円度しきい値", 0.0, 1.0, 0.7)
 
@@ -46,28 +47,30 @@ uploaded_files = st.file_uploader("ドロップ", type=['jpg', 'png', 'jpeg'], a
 
 if uploaded_files:
     for f in uploaded_files:
-        # 画像の読み込みと軽量化
         img_raw = Image.open(f).convert('RGB')
         img_raw.thumbnail((800, 800), Image.Resampling.LANCZOS)
         
         img_edit = img_raw.copy()
         if invert_image:
             img_edit = ImageOps.invert(img_edit)
+            
         img_np = np.array(img_edit)
+        
+        # ぼかし処理の適用
+        if blur_strength > 0:
+            k = blur_strength * 2 + 1  # カーネルサイズ（奇数にする）
+            img_np = cv2.GaussianBlur(img_np, (k, k), 0)
         
         st.subheader(f"解析: {f.name}")
         col_pre, col_res = st.columns(2)
         
         with col_pre:
-            st.image(img_edit, caption="AIが実際に見ている画像", use_container_width=True)
+            # プレビューにもぼかし結果を表示
+            st.image(img_np, caption="AIが実際に見ている画像（ぼかし適用後）", use_container_width=True, channels="RGB")
 
-        # キャッシュキーを作成（設定が変わったら別のキーになる）
-        cache_key = f"{f.name}_{invert_image}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
+        cache_key = f"{f.name}_{invert_image}_{blur_strength}_{model_choice}_{target_diameter}_{flow_threshold}_{cellprob_threshold}"
 
-        # 「解析ボタンが押された時」または「すでに今の設定で解析済みの時」に結果を表示
         if submit_btn or cache_key in st.session_state.masks_cache:
-            
-            # まだ解析していない設定ならAIを走らせる
             if cache_key not in st.session_state.masks_cache:
                 with st.spinner('AIが計算中...'):
                     model_name = 'cyto2' if model_choice == "cyto2" else 'nuclei'
@@ -78,11 +81,9 @@ if uploaded_files:
                                              flow_threshold=flow_threshold,
                                              cellprob_threshold=cellprob_threshold,
                                              channels=[0,0])
-                    # 計算結果を保存
                     st.session_state.masks_cache[cache_key] = masks
                     gc.collect()
 
-            # 保存してある結果（マスク）を呼び出す
             masks = st.session_state.masks_cache[cache_key].copy()
             
             if exclude_border:
