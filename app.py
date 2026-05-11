@@ -4,12 +4,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from skimage import color, filters, morphology, feature, segmentation, measure
 from scipy import ndimage as ndi
-import io as python_io
 from PIL import Image, ImageEnhance, ImageOps
 import cv2
 
-st.set_page_config(page_title="Sphere Analyzer v3.2", layout="wide")
-st.title("🔴 スフェア自動計測ツール v3.2 (隠しフィルター全解放版)")
+st.set_page_config(page_title="Sphere Analyzer v3.3", layout="wide")
+st.title("🔴 スフェア自動計測ツール v3.3 (背景逆算モード搭載)")
 
 with st.sidebar:
     st.header("1. 基本設定")
@@ -21,16 +20,21 @@ with st.sidebar:
     contrast = st.slider("コントラスト", 0.5, 3.0, 1.0)
     sharpness = st.slider("シャープネス", 0.0, 5.0, 1.0)
 
-    st.header("3. 二値化 (影を拾う力)")
-    blur_sigma = st.slider("ぼかし強さ", 0.0, 10.0, 2.0)
-    # 追加：拾う細かさ（ブロックサイズ）
-    block_size_slider = st.slider("二値化の細かさ (Block Size)", 11, 201, 51, step=10, help="小さいほど内部のザラザラなどの細かい影まで拾います")
-    offset = st.slider("縁の拾いやすさ (Offset)", -0.10, 0.10, 0.00, step=0.01, help="マイナスにするとより多くの影を拾い、プラスにすると厳選します")
+    st.header("3. 二値化 (抽出モード選択)")
+    # 今回の目玉：抽出方法の選択
+    extraction_mode = st.radio("抽出方法:", ("背景から逆算する (おすすめ)", "細かい影を拾う (従来)"), index=0)
+    
+    blur_sigma = st.slider("ぼかし強さ", 0.0, 10.0, 3.0, help="背景のノイズを滑らかにします")
+    
+    if extraction_mode == "背景から逆算する (おすすめ)":
+        global_offset = st.slider("背景の判定ライン (閾値微調整)", -0.30, 0.30, 0.00, step=0.01, help="右に動かすと背景の判定が広がり、左に動かすとスフェアが太くなります")
+    else:
+        block_size_slider = st.slider("二値化の細かさ (Block Size)", 11, 201, 51, step=10)
+        local_offset = st.slider("縁の拾いやすさ (Offset)", -0.10, 0.10, 0.00, step=0.01)
 
     st.header("4. ノイズ処理 (ImageJ機能)")
-    # 追加：隠していたゴミ取りと穴埋めを解放
-    noise_removal = st.slider("ゴミ取り (最小ピクセル数)", 0, 500, 50, help="この数値以下の小さな点（ザラザラ等）を消去します")
-    fill_holes = st.checkbox("スフェア内部の穴埋めを実行", value=True, help="チェックを外すとスフェアの中のザラザラが残ったままになります")
+    noise_removal = st.slider("ゴミ取り (最小ピクセル数)", 0, 1000, 50, help="この数値以下の小さな点を消去します")
+    fill_holes = st.checkbox("スフェア内部の穴埋めを実行", value=True, help="ザラザラを潰して一つの塊にします")
 
     st.header("5. 切り離し (Watershed)")
     min_dist = st.number_input("中心間の最小距離 (px)", value=30)
@@ -57,32 +61,36 @@ if uploaded_files:
         img_edit = enhancer_s.enhance(sharpness)
         
         img_np = np.array(img_edit)
-        
         gray = color.rgb2gray(img_np)
+        
         if blur_sigma > 0:
             blurred = filters.gaussian(gray, sigma=blur_sigma)
         else:
             blurred = gray
-        
-        # 二値化ブロックサイズは必ず奇数にする必要がある
-        block_size = int(block_size_slider)
-        if block_size % 2 == 0:
-            block_size += 1
 
-        local_thresh = filters.threshold_local(blurred, block_size, offset=offset)
-        
-        if invert_image:
-            binary = blurred > local_thresh
+        # 二値化のロジック分岐
+        if extraction_mode == "背景から逆算する (おすすめ)":
+            base_thresh = filters.threshold_otsu(blurred)
+            adj_thresh = base_thresh + global_offset
+            if invert_image:
+                binary = blurred > adj_thresh
+            else:
+                binary = blurred < adj_thresh
         else:
-            binary = blurred < local_thresh 
+            block_size = int(block_size_slider)
+            if block_size % 2 == 0:
+                block_size += 1
+            local_thresh = filters.threshold_local(blurred, block_size, offset=local_offset)
+            if invert_image:
+                binary = blurred > local_thresh
+            else:
+                binary = blurred < local_thresh 
             
-        # 表に出した「ゴミ取り機能」
         if noise_removal > 0:
             cleaned = morphology.remove_small_objects(binary, min_size=noise_removal)
         else:
             cleaned = binary
 
-        # 表に出した「穴埋め機能」
         if fill_holes:
             filled = ndi.binary_fill_holes(cleaned)
         else:
@@ -104,9 +112,9 @@ if uploaded_files:
         with st.expander("🔍 途中経過（補正・二値化・ゴミ取り・穴埋め）を見る"):
             col_a, col_b, col_c = st.columns(3)
             with col_a:
-                st.image(img_edit, caption="0. 補正後の画像 (AIが見ているもの)", use_container_width=True)
+                st.image(img_edit, caption="0. 補正後の画像", use_container_width=True)
             with col_b:
-                st.image(binary.astype(float), caption="1. 二値化 (すべて拾った状態)", use_container_width=True)
+                st.image(binary.astype(float), caption="1. 二値化 (背景逆算)", use_container_width=True)
             with col_c:
                 st.image(filled.astype(float), caption="2. ゴミ取り＆穴埋め後", use_container_width=True)
 
@@ -129,7 +137,6 @@ if uploaded_files:
             
             with col_res1:
                 fig, ax = plt.subplots()
-                # 今回は「加工後の画像（img_np）」の上に緑の線を引くので、反転などが確認できます
                 ax.imshow(img_np) 
                 ax.contour(labels > 0, colors='lime', linewidths=0.5)
                 ax.axis('off')
