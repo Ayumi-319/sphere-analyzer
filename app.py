@@ -6,12 +6,12 @@ import matplotlib.pyplot as plt
 from skimage import measure, segmentation, exposure
 import io as python_io
 from pptx import Presentation
-from PIL import Image, ImageOps
+from PIL import Image
 import torch
 import cv2
 
-st.set_page_config(page_title="Sphere Analyzer v2.5", layout="wide")
-st.title("🔴 スフェア自動計測ツール v2.5")
+st.set_page_config(page_title="Sphere Analyzer v2.5.1", layout="wide")
+st.title("🔴 スフェア自動計測ツール v2.5.1")
 
 @st.cache_resource
 def get_model():
@@ -23,8 +23,8 @@ with st.sidebar:
     um_per_pixel = 3.23 if mag == "4x" else 1.28 if mag == "10x" else st.number_input("μm/px", value=1.0)
 
     st.header("2. 画像補正 (再計算)")
-    # コントラストを調整してエッジを立たせる
-    contrast = st.slider("エッジ強調 (Contrast)", 0.5, 3.0, 1.0, help="値を上げると境界線がはっきりします")
+    # コントラスト調整のアルゴリズムを変更
+    contrast_factor = st.slider("コントラスト倍率", 0.0, 2.0, 1.0, help="1.0より上げると暗い部分がより暗く、エッジが際立ちます")
     
     st.header("3. AI解析設定 (再計算)")
     target_diameter = st.number_input("予想直径 (px)", value=150)
@@ -54,11 +54,13 @@ if uploaded_files:
         for name, original_img in images:
             st.subheader(f"解析: {name}")
             
-            cache_key = f"{name}_{contrast}_{target_diameter}_{flow_threshold}"
+            cache_key = f"{name}_{contrast_factor}_{target_diameter}_{flow_threshold}"
             if cache_key not in st.session_state.analysis_cache:
-                with st.spinner(f'{name} を画像補正＆解析中...'):
-                    # 画像補正（コントラスト調整）
-                    img_adj = exposure.adjust_contrast(original_img, contrast)
+                with st.spinner(f'{name} を解析中...'):
+                    # 画像補正：コントラスト強調
+                    # 暗い部分をカットしてエッジを立たせる処理
+                    p2, p98 = np.percentile(original_img, (2 * contrast_factor, 98))
+                    img_adj = exposure.rescale_intensity(original_img, in_range=(p2, p98))
                     
                     h, w = img_adj.shape[:2]
                     scale = 800 / max(h, w) if max(h, w) > 800 else 1.0
@@ -71,7 +73,6 @@ if uploaded_files:
                     
                     masks = cv2.resize(masks.astype(np.uint16), (w, h), interpolation=cv2.INTER_NEAREST)
                     
-                    # 端っこの除去処理
                     if exclude_border:
                         masks = segmentation.clear_border(masks)
                         
