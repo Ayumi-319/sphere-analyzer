@@ -10,10 +10,10 @@ from PIL import Image
 import torch
 import cv2
 
-st.set_page_config(page_title="Sphere Analyzer v2.3", layout="wide")
-st.title("🔴 スフェア自動計測ツール v2.3 (高速版)")
+st.set_page_config(page_title="Sphere Analyzer v2.4", layout="wide")
+st.title("🔴 スフェア自動計測ツール v2.4")
 
-# モデルのキャッシュ化（起動時1回のみ）
+# モデルのキャッシュ化
 @st.cache_resource
 def get_model():
     return models.CellposeModel(gpu=False, model_type='cyto', device=torch.device('cpu'))
@@ -23,15 +23,22 @@ with st.sidebar:
     mag = st.radio("倍率:", ("4x", "10x", "カスタム"), index=0)
     um_per_pixel = 3.23 if mag == "4x" else 1.28 if mag == "10x" else st.number_input("μm/px", value=1.0)
 
-    st.header("2. AI解析設定")
-    target_diameter = st.number_input("予想直径 (px) ※変更すると再解析", value=150)
+    st.header("2. AI解析設定 (要・再計算)")
+    # 初期値に戻すための仕組み
+    if st.button("🔄 設定をリセット"):
+        st.session_state.target_dia = 150
+        st.session_state.flow_threshold = 0.4
+        st.rerun()
+
+    target_diameter = st.number_input("予想直径 (px)", value=st.session_state.get('target_dia', 150), key="target_dia")
+    # 切り離し強度の設定を追加
+    flow_threshold = st.slider("切り離し強度 (Flow Threshold)", 0.0, 1.1, st.session_state.get('flow_threshold', 0.4), key="flow_threshold", help="大きいほどくっついたスフェアを分離します。初期値は0.4です。")
     
-    st.header("3. フィルタ設定")
-    circularity_threshold = st.slider("真円度しきい値 ※即時反映", 0.0, 1.0, 0.8)
+    st.header("3. フィルタ設定 (即時反映)")
+    circularity_threshold = st.slider("真円度しきい値", 0.0, 1.0, 0.8)
 
 uploaded_files = st.file_uploader("JPG/PNG/PPTXをドロップ", type=['jpg', 'png', 'pptx', 'jpeg'], accept_multiple_files=True)
 
-# 解析結果を保存しておく箱
 if 'analysis_cache' not in st.session_state:
     st.session_state.analysis_cache = {}
 
@@ -40,7 +47,6 @@ if uploaded_files:
     all_final_results = []
 
     for f in uploaded_files:
-        # 画像の読み込み処理
         if f.name.lower().endswith('.pptx'):
             prs = Presentation(f)
             images = [(f"{f.name}_S{i+1}", np.array(Image.open(python_io.BytesIO(s.image.blob)))) 
@@ -51,24 +57,26 @@ if uploaded_files:
         for name, img in images:
             st.subheader(f"解析: {name}")
             
-            # AI解析（直径設定が変わった時だけ実行）
-            cache_key = f"{name}_{target_diameter}"
+            # 直径または切り離し強度が変わった時に再計算
+            cache_key = f"{name}_{target_diameter}_{flow_threshold}"
             if cache_key not in st.session_state.analysis_cache:
-                with st.spinner(f'{name} を計算中...'):
-                    # 高速化のため画像をリサイズして解析（内部処理のみ）
+                with st.spinner(f'{name} を解析中...'):
                     h, w = img.shape[:2]
-                    resized_img = cv2.resize(img, (w//2, h//2))
-                    masks, _, _ = model.eval(resized_img, diameter=target_diameter//2, channels=[0,0])
-                    # マスクを元のサイズに復元
-                    masks = cv2.resize(masks.astype(np.uint16), (w, h), interpolation=cv2.INTER_NEAREST)
+                    # 処理速度とメモリを考慮し、長辺を1000px程度に抑える
+                    scale = 1000 / max(h, w) if max(h, w) > 1000 else 1.0
+                    resized_img = cv2.resize(img, (int(w*scale), int(h*scale)))
                     
-                    # 全データの計測
+                    masks, _, _ = model.eval(resized_img, 
+                                             diameter=target_diameter*scale, 
+                                             flow_threshold=flow_threshold,
+                                             channels=[0,0])
+                    
+                    masks = cv2.resize(masks.astype(np.uint16), (w, h), interpolation=cv2.INTER_NEAREST)
                     props = measure.regionprops_table(masks, properties=['label', 'area', 'perimeter', 'equivalent_diameter'])
                     st.session_state.analysis_cache[cache_key] = (pd.DataFrame(props), masks)
 
             full_df, masks = st.session_state.analysis_cache[cache_key]
             
-            # フィルタリング（ここから下は一瞬で終わる）
             df = full_df.copy()
             df['circularity'] = (4 * np.pi * df['area']) / (df['perimeter'] ** 2)
             df['diameter_um'] = df['equivalent_diameter'] * um_per_pixel
@@ -94,4 +102,4 @@ if uploaded_files:
         output = python_io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             final_df.to_excel(writer, index=False)
-        st.download_button("📊 結果をExcel保存", output.getvalue(), "results.xlsx")
+        st.download_button("📊 Excel保存", output.getvalue(), "results.xlsx")
