@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
-import io
 from cellpose import models
 from skimage import measure, segmentation
+import torch
 
-st.set_page_config(page_title="Sphere Analyzer AI v6.2", layout="wide")
-st.title("🤖 スフェア自動計測ツール v6.2 (AI修正版)")
+st.set_page_config(page_title="Sphere Analyzer AI v6.3", layout="wide")
+st.title("🤖 スフェア自動計測ツール v6.3 (AI最新仕様版)")
 
 @st.cache_resource
 def load_ai_model():
-    import torch
+    # 最新版(v3.0+)の仕様に合わせ CellposeModel を使用
     device = torch.device('cpu')
-    # ここを修正：最新のCellposeは models.CellposeModel または models.Cellpose を使用します
-    return models.Cellpose(model_type='cyto', gpu=False, device=device)
+    # model_type='cyto' を指定
+    return models.CellposeModel(model_type='cyto', gpu=False, device=device)
 
 with st.sidebar:
     st.header("1. スケール設定")
@@ -24,6 +24,7 @@ with st.sidebar:
 
     st.header("2. AI解析設定")
     target_diam = st.number_input("予想直径 (px) ※0で自動", value=0)
+    # CellposeModel.eval では cellprob_threshold などの名称が使われます
     chan_threshold = st.slider("検出感度", -6.0, 6.0, 0.0)
     flow_threshold = st.slider("切り離し強度", 0.0, 1.0, 0.4)
 
@@ -42,8 +43,8 @@ if uploaded_file:
         with st.spinner("AIが計算中..."):
             try:
                 model = load_ai_model()
-                # channels=[0,0] はグレースケール用
-                masks, flows, styles, diams = model.eval(
+                # CellposeModel.eval を使用
+                masks, flows, styles = model.eval(
                     img_np, 
                     diameter=None if target_diam == 0 else target_diam,
                     channels=[0, 0],
@@ -81,7 +82,8 @@ if uploaded_file:
                 })
                 idx += 1
         
-        ax.contour(masks > 0, colors='lime', linewidths=0.5)
+        if masks.max() > 0:
+            ax.contour(masks > 0, colors='lime', linewidths=0.5)
         ax.axis('off')
         
         with col_img:
